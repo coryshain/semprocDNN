@@ -21,10 +21,12 @@ Trains and evaluates a DNN semproc model from counts file.
 ''')
 argparser.add_argument('path', help='Path to data file')
 argparser.add_argument('-m', '--mlr', action='store_true', help='Flag indicating fitting of full MLR model (no embedding layer)')
+argparser.add_argument('-c', '--cpuonly', action='store_true', help='Do not use GPU if available')
 args = argparser.parse_args()
 
 mlr = args.mlr
-if mlr:
+cpu = args.cpuonly
+if cpu:
     os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 import tensorflow as tf
 
