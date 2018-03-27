@@ -19,8 +19,8 @@ def dump_weights():
 argparser = argparse.ArgumentParser('''
 Trains and evaluates a DNN semproc model from counts file.
 ''')
-argparser.add_argument('path')
-argparser.add_argument('-m', '--mlr', action='store_true', description='Flag indicating fitting of full MLR model (no embedding layer)')
+argparser.add_argument('path', help='Path to data file')
+argparser.add_argument('-m', '--mlr', action='store_true', help='Flag indicating fitting of full MLR model (no embedding layer)')
 args = argparser.parse_args()
 
 mlr = args.mlr
