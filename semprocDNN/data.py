@@ -7,6 +7,7 @@ class Data(object):
     def __init__(self, path, verbose=True):
         decpars = {}
         i = 0
+        ix = 1 # Line indices are 1-indexed for convenience
         n = {}
         with open(path, 'r') as file:
             for line in file:
@@ -16,18 +17,20 @@ class Data(object):
                 else:
                     n[ID] += 1
                 if ID not in decpars:
-                    decpars[ID] = {condition: {consequent: count}}
+                    decpars[ID] = {condition: {consequent: {'count': count, 'index': ix}}}
                 else:
                     if condition not in decpars[ID]:
-                        decpars[ID][condition] = {consequent: count}
+                        decpars[ID][condition] = {consequent: {'count': count, 'index': ix}}
                     else:
                         if consequent not in decpars[ID][condition]:
-                            decpars[ID][condition][consequent] = float(count)
+                            decpars[ID][condition][consequent] = {'count': count, 'index': ix}
                         else:
-                            decpars[ID][condition][consequent] += float(count)
+                            decpars[ID][condition][consequent]['count'] += count
+                            sys.stderr.write('WARNING: Multiple entries for datapoint "%s"\n' %line.strip())
                 if verbose and i > 0 and i%100000 == 0:
                     sys.stderr.write('%s lines processed\n' %i)
                 i += 1
+                ix += 1
 
         self.dp = decpars
 
@@ -39,7 +42,11 @@ class Data(object):
         tokens = dp_line.strip().split()
         assert len(tokens) == 6
         model_id = tokens[0]
-        condition = tuple(tokens[1].split(','))
+        condition = tokens[1].split(',')
+        for i in range(len(condition)):
+            if condition[i].endswith('=1'):
+                condition[i] = condition[i][:-2]
+        condition = tuple(condition)
         consequent = tokens[3]
         count = float(tokens[5])
 
@@ -51,9 +58,11 @@ class Data(object):
         X = [None, [[], []]]
         y = []
         w = []
+        index = []
 
         with open(path, 'r') as file:
             i = 0
+            ix = 1
             for line in file:
                 ID_dp, condition, consequent, count = self.parse_decpar(line)
                 if ID_dp == ID:
@@ -63,8 +72,10 @@ class Data(object):
                             X[1][0].append(i)
                             X[1][1].append(cond_ix)
                     y.append(getattr(self, ID).consequent2ix.get(consequent, len(getattr(self, ID).ix2consequent)))
-                    w.append(float(count))
+                    w.append(count)
+                    index.append(ix)
                 i += 1
+                ix += 1
 
         X[0] = np.ones((len(X[1][0]),), dtype='uint8')
         assert len(X[0]) == len(X[1][0]) == len(X[1][1])
@@ -79,8 +90,9 @@ class Data(object):
 
         y = np.array(y, dtype='int32')
         w = np.array(w, dtype='float32')
+        index = np.array(index, dtype='int32')
 
-        return X, y, w
+        return X, y, w, index
 
 
 class Model(object):
@@ -114,6 +126,7 @@ class Model(object):
         X = [None, [[],[]]]
         y = np.zeros(self.n, dtype='int32')
         w = np.zeros(self.n, dtype='float32')
+        index = np.zeros(self.n, dtype='int32')
 
         i = 0
         for condition in self.dp:
@@ -125,7 +138,8 @@ class Model(object):
                     X[1][0].append(i)
                     X[1][1].append(ix)
                 y[i] = self.consequent2ix[consequent]
-                w[i] = self.dp[condition][consequent]
+                w[i] = self.dp[condition][consequent]['count']
+                index[i] = self.dp[condition][consequent]['index']
                 i += 1
 
         X[0] = np.ones((len(X[1][0]),), dtype='uint8')
@@ -140,6 +154,6 @@ class Model(object):
         X = coo_matrix(X, (self.n, self.n_condition))
         X = X.tocsr()
 
-        return X, y, w
+        return X, y, w, index
 
 

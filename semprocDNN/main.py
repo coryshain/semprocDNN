@@ -40,6 +40,9 @@ argparser.add_argument('-c', '--cpuonly', action='store_true', help='Do not use 
 argparser.add_argument('-d', '--dev', type=str, default=None, help='Path to dev (cross-validation) data, if used.')
 argparser.add_argument('-o', '--outdir', type=str, default='./semprocDNN_output/', help='Path to output directory.')
 argparser.add_argument('-e', '--embdim', type=int, default=256, help='Embedding dimensions')
+argparser.add_argument('-l', '--l1reg', type=float, default=0., help='L1 regularization constant')
+argparser.add_argument('-L', '--l2reg', type=float, default=0., help='L2 regularization constant')
+argparser.add_argument('-E', '--nexamples', type=int, default=0, help='Number of prediction examples to show at each iteration (defaults to 0).')
 args = argparser.parse_args()
 
 mlr = args.mlr
@@ -49,15 +52,9 @@ if cpu:
 import tensorflow as tf
 
 d = Data(args.path)
-X, y, w = d.F.to_matrices()
-print(X.shape)
-print(y.shape)
-print(w.shape)
+X, y, w, index = d.F.to_matrices()
 if args.dev is not None:
-    X_cv, y_cv, w_cv = d.encode_data(args.dev, 'F')
-    print(X_cv.shape)
-    print(y_cv.shape)
-    print(w_cv.shape)
+    X_cv, y_cv, w_cv, index_cv = d.encode_data(args.dev, 'F')
 
 batch_size = 256
 depth = 1
@@ -69,14 +66,24 @@ with sess.as_default():
         y_ = tf.placeholder(tf.int32, shape=[None])
         w_ = tf.placeholder(tf.float32, [None])
 
-
+        l1 = tf.contrib.layers.l1_regularizer(scale=args.l1reg)
+        l2 = tf.contrib.layers.l2_regularizer(scale=args.l2reg)
+        regularizer_losses = []
 
         if mlr:
             weights_final = tf.Variable(tf.random_normal([d.F.n_condition, d.F.n_consequent], stddev=0.1), name='weights_final', dtype=tf.float32)
+            if args.l1reg > 0:
+                regularizer_losses.append(tf.contrib.layers.apply_regularization(l1, [weights_final]))
+            if args.l2reg > 0:
+                regularizer_losses.append(tf.contrib.layers.apply_regularization(l2, [weights_final]))
             activity_final = tf.sparse_tensor_dense_matmul(X_, weights_final)
 
         else:
             embedding_weights = tf.Variable(tf.random_normal([d.F.n_condition, args.embdim], stddev=0.1), name='embeddings')
+            if args.l1reg > 0:
+                regularizer_losses.append(tf.contrib.layers.apply_regularization(l1, [embedding_weights]))
+            if args.l2reg > 0:
+                regularizer_losses.append(tf.contrib.layers.apply_regularization(l2, [embedding_weights]))
             embedding = tf.sparse_tensor_dense_matmul(X_, embedding_weights)
 
             layers = [embedding]
@@ -87,17 +94,27 @@ with sess.as_default():
 
             for i in range(depth-1):
                 weights[i] = tf.Variable(tf.random_normal([args.embdim, args.embdim], stddev=0.1), name='weights_%d'%i, dtype=tf.float32)
+                if args.l1reg > 0:
+                    regularizer_losses.append(tf.contrib.layers.apply_regularization(l1, [weights[i]]))
+                if args.l2reg > 0:
+                    regularizer_losses.append(tf.contrib.layers.apply_regularization(l2, [weights[i]]))
                 activity[i] = tf.matmul(embedding, weights[i])
                 activation[i] = tf.nn.relu(activity[i], name='activation_%d'%i)
                 layers.append(activation)
 
             weights_final = tf.Variable(tf.random_normal([args.embdim, d.F.n_consequent], stddev=0.1), name='weights_final', dtype=tf.float32)
+            if args.l1reg > 0:
+                regularizer_losses.append(tf.contrib.layers.apply_regularization(l1, [weights_final]))
+            if args.l2reg > 0:
+                regularizer_losses.append(tf.contrib.layers.apply_regularization(l2, [weights_final]))
             activity_final = tf.matmul(layers[-1], weights_final)
 
         logits = activity_final
         loss_per_example = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=y_, logits=logits)
         weighted_loss_per_example = loss_per_example * w_
         loss_op = tf.reduce_mean(weighted_loss_per_example)
+        if args.l1reg > 0 or args.l2reg > 0:
+            loss_op += tf.add_n(regularizer_losses)
 
         soft_predictions = tf.nn.softmax(logits)
         hard_predictions = tf.cast(tf.argmax(soft_predictions, axis=1), tf.int32)
@@ -137,7 +154,6 @@ with sess.as_default():
         p = np.arange(n)
         n_batch = math.ceil(n/batch_size)
 
-        print(global_batch_step.eval(session=sess))
         report_n_params(sess)
 
         while global_step.eval(session=sess) < 1000:
@@ -192,14 +208,16 @@ with sess.as_default():
                 loss_total += loss_batch * X_coo.shape[0]
                 acc_total += acc_batch * X_coo.shape[0]
 
+            sess.run(incr_global_step)
+            saver.save(sess, args.outdir + '/model.ckpt')
+
             loss_total /= n
             acc_total /= n
 
-            if iteration % 5 == 0:
+            if (iteration-1) % 5 == 0:
                 if not args.mlr:
                     dump_embeddings(args.outdir, args.embdim)
                     dump_weights(args.outdir, args.embdim)
-            saver.save(sess, args.outdir + '/model.ckpt')
 
             loss_cv, acc_cv = sess.run([loss_op, acc_op], feed_dict=fd_cv)
 
@@ -207,7 +225,41 @@ with sess.as_default():
             summary_iter_cv = sess.run(summary, feed_dict = {loss_total_summary:loss_cv, acc_total_summary:acc_cv})
             writer_train.add_summary(summary_iter_train, global_step.eval(session=sess))
             writer_cv.add_summary(summary_iter_cv, global_step.eval(session=sess))
-            sess.run(incr_global_step)
+
+            if args.nexamples > 0:
+                ix = np.random.choice(X.shape[0], args.nexamples)
+                X_coo = X[ix].tocoo()
+                X_dense = X[ix].todense()
+                X_example = tf.SparseTensorValue(
+                    indices=np.stack([X_coo.row, X_coo.col], axis=1),
+                    values=X_coo.data,
+                    dense_shape=X_coo.shape
+                )
+                fd_example = {
+                    X_: X_example,
+                    y_: y[ix],
+                    w_: w[ix]
+                }
+                preds, acc = sess.run([hard_predictions, acc_op], feed_dict=fd_example)
+
+                sys.stderr.write('Output examples:\n')
+
+                for i in range(len(preds)):
+                    feat_ix = np.where(X_dense[i])[1]
+                    feats = []
+                    for f in feat_ix:
+                        feats.append(d.F.ix2condition[f])
+
+                    sys.stderr.write('  Source Index:  %s\n' %(index[ix[i]]))
+                    sys.stderr.write('  Feats:         %s\n' %(','.join(feats)))
+                    sys.stderr.write('  Pred:          %s\n' %(d.F.ix2consequent[preds[i]]))
+                    sys.stderr.write('  Gold:          %s\n' %(d.F.ix2consequent[y[ix[i]]]))
+                    sys.stderr.write('  Weight:        %s\n' %(w[ix[i]]))
+                    sys.stderr.write()
+
+                sys.stderr.write('Sample accuracy: %s\n' %acc)
+                sys.stderr.write()
+
 
         if not args.mlr:
             sys.stderr.write('Linearizing weight matrices...\n')
